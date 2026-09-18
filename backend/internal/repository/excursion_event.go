@@ -12,6 +12,7 @@ import (
 type ExcursionEventRepository interface {
 	List(context.Context, dto.PageQuery) (Page[model.ExcursionEvent], error)
 	Get(context.Context, uint) (model.ExcursionEvent, error)
+	GetByCode(context.Context, string) (model.ExcursionEvent, error)
 	Create(context.Context, *model.ExcursionEvent) error
 	Update(context.Context, uint, uint, *model.ExcursionEvent, ...*model.AuditLog) error
 	Delete(context.Context, uint) error
@@ -31,6 +32,11 @@ func (r *excursionEventRepository) List(ctx context.Context, q dto.PageQuery) (P
 }
 func (r *excursionEventRepository) Get(ctx context.Context, id uint) (model.ExcursionEvent, error) {
 	return r.store.Get(ctx, id)
+}
+func (r *excursionEventRepository) GetByCode(ctx context.Context, code string) (model.ExcursionEvent, error) {
+	var item model.ExcursionEvent
+	err := r.store.db.WithContext(ctx).Where("code = ?", code).First(&item).Error
+	return item, err
 }
 func (r *excursionEventRepository) Create(ctx context.Context, item *model.ExcursionEvent) error {
 	return r.store.Create(ctx, item)

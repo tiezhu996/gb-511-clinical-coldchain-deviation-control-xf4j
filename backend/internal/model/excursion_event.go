@@ -23,6 +23,11 @@ type ExcursionEvent struct {
 	EffectiveAt     time.Time `json:"effectiveAt"`
 	Evidence        string    `json:"evidence" gorm:"size:2000"`
 	RelatedCode     string    `json:"relatedCode" gorm:"size:64;index"`
+	// CurrentAssessmentVersion points at the effective ImpactAssessment snapshot.
+	// It is set whenever the deviation enters "decided" and cleared while the
+	// deviation is back in review, so dispositions can only close it when they
+	// match the current assessment version.
+	CurrentAssessmentVersion *uint `json:"currentAssessmentVersion" gorm:"index"`
 }
 
 func (item *ExcursionEvent) GetBase() *BaseModel { return &item.BaseModel }

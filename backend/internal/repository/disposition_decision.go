@@ -16,15 +16,20 @@ type DispositionDecisionRepository interface {
 	Update(context.Context, uint, uint, *model.DispositionDecision, ...*model.AuditLog) error
 	Delete(context.Context, uint) error
 	CountByStatus(context.Context) (map[string]int64, error)
-	HasFinalForExcursion(context.Context, string) (bool, error)
+	ListForExcursion(ctx context.Context, excursionCode string) ([]model.DispositionDecision, error)
+	// HasEffectiveFinalForExcursion reports whether a final, never-invalidated
+	// decision exists for the assessment version currently effective on the
+	// deviation.
+	HasEffectiveFinalForExcursion(ctx context.Context, excursionCode string, assessmentVersion uint) (bool, error)
 }
 
 type dispositionDecisionRepository struct {
 	store *Store[model.DispositionDecision]
+	db    *gorm.DB
 }
 
 func NewDispositionDecisionRepository(db *gorm.DB) DispositionDecisionRepository {
-	return &dispositionDecisionRepository{store: NewStore[model.DispositionDecision](db)}
+	return &dispositionDecisionRepository{store: NewStore[model.DispositionDecision](db), db: db}
 }
 
 func (r *dispositionDecisionRepository) List(ctx context.Context, q dto.PageQuery) (Page[model.DispositionDecision], error) {
@@ -45,8 +50,17 @@ func (r *dispositionDecisionRepository) Delete(ctx context.Context, id uint) err
 func (r *dispositionDecisionRepository) CountByStatus(ctx context.Context) (map[string]int64, error) {
 	return r.store.CountByStatus(ctx)
 }
-func (r *dispositionDecisionRepository) HasFinalForExcursion(ctx context.Context, code string) (bool, error) {
+func (r *dispositionDecisionRepository) ListForExcursion(ctx context.Context, code string) ([]model.DispositionDecision, error) {
+	items := make([]model.DispositionDecision, 0)
+	err := r.db.WithContext(ctx).Where("excursion_code = ?", code).
+		Order("updated_at DESC, id DESC").Find(&items).Error
+	return items, err
+}
+func (r *dispositionDecisionRepository) HasEffectiveFinalForExcursion(ctx context.Context, code string, assessmentVersion uint) (bool, error) {
 	var count int64
-	err := r.store.db.WithContext(ctx).Model(&model.DispositionDecision{}).Where("excursion_code = ? AND status IN ?", code, []string{"release", "quarantine", "discard"}).Count(&count).Error
+	err := r.db.WithContext(ctx).Model(&model.DispositionDecision{}).
+		Where("excursion_code = ? AND assessment_version = ? AND invalidated_reason = '' AND status IN ?",
+			code, assessmentVersion, []string{"release", "quarantine", "discard"}).
+		Count(&count).Error
 	return count > 0, err
 }

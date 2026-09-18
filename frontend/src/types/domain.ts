@@ -38,6 +38,34 @@ export interface DomainRecord {
   proposedBy?: string;
   approvedBy?: string;
   decidedAt?: string | null;
+  // Impact assessment versioning: deviations point at the current version,
+  // decisions are pinned to the version that was current when proposed.
+  currentAssessmentVersion?: number | null;
+  assessmentVersion?: number | null;
+  invalidatedReason?: string;
+  invalidatedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ImpactAssessment {
+  id: number;
+  excursionCode: string;
+  assessmentVersion: number;
+  summary: string;
+  impactLevel: string;
+  affectedProduct: string;
+  stabilityConclusion: string;
+  riskLevel: string;
+  observedTempC: number;
+  durationMinutes: number;
+  sensorEvidence: string;
+  evaluatedBy: string;
+  evaluatedAt: string;
+  status: 'current' | 'superseded';
+  supersededBy?: string;
+  supersededAt?: string | null;
+  supersedeReason?: string;
   createdAt: string;
   updatedAt: string;
 }

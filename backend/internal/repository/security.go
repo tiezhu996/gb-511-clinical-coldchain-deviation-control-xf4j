@@ -13,6 +13,11 @@ import (
 
 var ErrVersionConflict = errors.New("record was changed by another request")
 
+// ErrInvalidWorkflowState marks a cross-aggregate state-machine violation, such
+// as returning a deviation that is not currently evaluated or approving a
+// disposition that is no longer a draft.
+var ErrInvalidWorkflowState = errors.New("deviation workflow state does not allow the requested action")
+
 type Page[T any] struct {
 	Items    []T   `json:"items"`
 	Total    int64 `json:"total"`

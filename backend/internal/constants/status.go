@@ -25,6 +25,18 @@ const (
 
 var AllExcursionState = []string{"open", "in_review", "decided", "closed"}
 
+// AssessmentState tracks the lifecycle of an ImpactAssessment snapshot. Only
+// the latest version for an excursion is "current"; returning a decided
+// deviation for re-review marks every prior version "superseded".
+type AssessmentState string
+
+const (
+	AssessmentStateCurrent    AssessmentState = "current"
+	AssessmentStateSuperseded AssessmentState = "superseded"
+)
+
+var AllAssessmentState = []string{"current", "superseded"}
+
 var TransportContainerTransitions = map[string]map[string]bool{
 	"ready":      {"in_transit": true, "quarantine": true},
 	"in_transit": {"quarantine": true, "cleared": true, "ready": true},

@@ -29,7 +29,8 @@ docker compose down -v --remove-orphans
 | 运输容器 | `TransportContainer` | `/api/containers` | ready, in_transit, quarantine, cleared |
 | 温控规则 | `TemperatureWindow` | `/api/windows` | draft, active, expired, superseded |
 | 偏差事件 | `ExcursionEvent` | `/api/excursions` | open, in_review, decided, closed |
-| 处置决定 | `DispositionDecision` | `/api/dispositions` | draft, release, quarantine, discard |
+| 影响评估版本 | `ImpactAssessment` | `/api/excursions/:id/assessments` | current, superseded |
+| 处置决定 | `DispositionDecision` | `/api/dispositions` | draft, release, quarantine, discard（可标记 invalidated 历史失效） |
 | 传感器证据 | `SensorEvidence` | `/api/evidence` | 不可变登记记录 |
 
 - JWT 登录和 viewer/operator/reviewer/admin 四级 RBAC。
@@ -37,6 +38,9 @@ docker compose down -v --remove-orphans
 - 偏差与处置状态变化使用乐观锁，并与 request ID、前后状态、证据一起原子写入审计日志。
 - 传感器证据拥有独立实体和五层后端实现，通过 MinIO 生成限时上传地址并保存 SHA-256 元数据。
 - 处置决定实行双人复核：提议人不能批准自己的提议，最终决定不可编辑或反向迁移；偏差没有最终处置时不能关闭。
+- 偏差影响评估实行版本化：偏差进入"已评估"时生成新的影响评估版本；处置提议只引用当前版本，关闭偏差必须使用与当前版本一致且经另一人批准的最终决定。
+- 已评估偏差可退回重审：旧评估版本转为历史、关联决定写入失效原因且不能再批准或闭环；重新评估后按新版本新建决定并独立批准。退回与批准并发时，跨聚合事务（行锁 + 乐观锁）保证只保留一个有效结果。
+- 偏差页与决定页展示当前评估版本、历史版本与决定失效原因；新增 `GET /api/excursions/:id/assessments` 与 `GET /api/excursions/:id/decisions`。
 - 请求 ID、结构化日志、全局错误映射和 Redis 分布式限流。
 - 提供脱敏运行配置、当前会话、审计汇总和单实体审计历史接口。
 - 业务工作台支持查询、新建、状态推进、风险标识及操作审计查看。

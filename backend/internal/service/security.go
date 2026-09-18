@@ -19,6 +19,10 @@ var (
 	ErrInvalidInput      = errors.New("business input validation failed")
 	ErrUnauthorized      = errors.New("invalid username or password")
 	ErrInactiveUser      = errors.New("user account is inactive")
+	// ErrStaleAssessment means the referenced impact assessment version has been
+	// superseded by a re-review; a new decision must be proposed on the current
+	// version.
+	ErrStaleAssessment = errors.New("assessment version is no longer current")
 )
 
 type SecurityService interface {

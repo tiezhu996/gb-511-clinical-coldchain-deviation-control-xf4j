@@ -21,17 +21,20 @@ type ExcursionEventService interface {
 	Transition(context.Context, uint, dto.TransitionRequest, string, string) (model.ExcursionEvent, error)
 	Delete(context.Context, uint, string, string) error
 	StatusCounts(context.Context) (map[string]int64, error)
+	ListAssessments(context.Context, uint) ([]model.ImpactAssessment, error)
+	ListDecisions(context.Context, uint) ([]model.DispositionDecision, error)
 }
 
 type excursionEventService struct {
 	repository  repository.ExcursionEventRepository
 	disposition repository.DispositionDecisionRepository
+	assessments repository.ImpactAssessmentRepository
 	evidence    repository.SensorEvidenceRepository
 	security    SecurityService
 }
 
-func NewExcursionEventService(repo repository.ExcursionEventRepository, disposition repository.DispositionDecisionRepository, evidence repository.SensorEvidenceRepository, security SecurityService) ExcursionEventService {
-	return &excursionEventService{repository: repo, disposition: disposition, evidence: evidence, security: security}
+func NewExcursionEventService(repo repository.ExcursionEventRepository, disposition repository.DispositionDecisionRepository, assessments repository.ImpactAssessmentRepository, evidence repository.SensorEvidenceRepository, security SecurityService) ExcursionEventService {
+	return &excursionEventService{repository: repo, disposition: disposition, assessments: assessments, evidence: evidence, security: security}
 }
 
 func (s *excursionEventService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.ExcursionEvent], error) {
@@ -128,33 +131,128 @@ func (s *excursionEventService) Transition(ctx context.Context, id uint, input d
 	if evidence == "" {
 		evidence = strings.TrimSpace(firstNonEmpty(current.SensorEvidence, current.Evidence))
 	}
-	if target == string(constants.ExcursionStateDecided) && evidence == "" {
-		return model.ExcursionEvent{}, fmt.Errorf("%w: sensor evidence is required before deciding an excursion", ErrInvalidInput)
-	}
-	if target == string(constants.ExcursionStateDecided) {
+
+	switch target {
+	case string(constants.ExcursionStateInReview):
+		// Decided -> in_review is "退回重审": supersede the current assessment
+		// version and invalidate every decision bound to it, atomically.
+		if before == string(constants.ExcursionStateDecided) {
+			return s.returnForReview(ctx, current, input, evidence, actor, requestID)
+		}
+		current.Status = target
+		current.SensorEvidence = evidence
+		current.Evidence = evidence
+		current.Reviewer = actor
+		current.Version = input.ExpectedVersion + 1
+		current.UpdatedAt = time.Now().UTC()
+		detail, _ := json.Marshal(map[string]any{"reason": input.Reason, "sensorEvidence": evidence, "containerCode": current.ContainerCode})
+		if err := s.repository.Update(ctx, id, input.ExpectedVersion, &current, auditLog(actor, requestID, "transition", "ExcursionEvent", id, before, target, string(detail))); err != nil {
+			return model.ExcursionEvent{}, fmt.Errorf("transition 偏差事件: %w", err)
+		}
+		return s.repository.Get(ctx, id)
+
+	case string(constants.ExcursionStateDecided):
+		if evidence == "" {
+			return model.ExcursionEvent{}, fmt.Errorf("%w: sensor evidence is required before deciding an excursion", ErrInvalidInput)
+		}
 		if count, err := s.evidence.CountForExcursion(ctx, current.Code); err != nil || count == 0 {
 			return model.ExcursionEvent{}, fmt.Errorf("%w: registered sensor evidence is required before deciding an excursion", ErrInvalidInput)
 		}
-	}
-	if target == string(constants.ExcursionStateClosed) {
-		final, err := s.disposition.HasFinalForExcursion(ctx, current.Code)
-		if err != nil || !final {
-			return model.ExcursionEvent{}, fmt.Errorf("%w: a final disposition is required before closing an excursion", ErrInvalidInput)
+		return s.completeAssessment(ctx, current, input, evidence, actor, requestID)
+
+	case string(constants.ExcursionStateClosed):
+		if current.CurrentAssessmentVersion == nil {
+			return model.ExcursionEvent{}, fmt.Errorf("%w: the deviation has no current impact assessment version", ErrInvalidInput)
 		}
+		final, err := s.disposition.HasEffectiveFinalForExcursion(ctx, current.Code, *current.CurrentAssessmentVersion)
+		if err != nil {
+			return model.ExcursionEvent{}, err
+		}
+		if !final {
+			return model.ExcursionEvent{}, fmt.Errorf("%w: closing requires an independently approved final decision consistent with current assessment version %d", ErrInvalidInput, *current.CurrentAssessmentVersion)
+		}
+		current.Status = target
+		current.SensorEvidence = evidence
+		current.Evidence = evidence
+		current.Version = input.ExpectedVersion + 1
+		current.UpdatedAt = time.Now().UTC()
+		detail, _ := json.Marshal(map[string]any{
+			"reason": input.Reason, "sensorEvidence": evidence, "containerCode": current.ContainerCode,
+			"assessmentVersion": *current.CurrentAssessmentVersion,
+		})
+		if err := s.repository.Update(ctx, id, input.ExpectedVersion, &current, auditLog(actor, requestID, "transition", "ExcursionEvent", id, before, target, string(detail))); err != nil {
+			return model.ExcursionEvent{}, fmt.Errorf("transition 偏差事件: %w", err)
+		}
+		return s.repository.Get(ctx, id)
+
+	default:
+		return model.ExcursionEvent{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, before, target)
 	}
-	current.Status = target
-	current.SensorEvidence = evidence
-	current.Evidence = evidence
-	if target == string(constants.ExcursionStateInReview) || target == string(constants.ExcursionStateDecided) {
-		current.Reviewer = actor
+}
+
+// completeAssessment generates a new ImpactAssessment version and points the
+// deviation at it inside one transaction.
+func (s *excursionEventService) completeAssessment(ctx context.Context, current model.ExcursionEvent, input dto.TransitionRequest, evidence, actor, requestID string) (model.ExcursionEvent, error) {
+	// Version follows the highest historical version, so a re-evaluation after
+	// return-for-review always produces a brand-new version number.
+	nextVersion := uint(1)
+	if latest, err := s.assessments.LatestForExcursion(ctx, current.Code); err == nil {
+		nextVersion = latest.AssessmentVersion + 1
 	}
-	current.Version = input.ExpectedVersion + 1
-	current.UpdatedAt = time.Now().UTC()
-	detail, _ := json.Marshal(map[string]any{"reason": input.Reason, "sensorEvidence": evidence, "containerCode": current.ContainerCode})
-	if err := s.repository.Update(ctx, id, input.ExpectedVersion, &current, auditLog(actor, requestID, "transition", "ExcursionEvent", id, before, target, string(detail))); err != nil {
-		return model.ExcursionEvent{}, fmt.Errorf("transition 偏差事件: %w", err)
+	now := time.Now().UTC()
+	assessment := &model.ImpactAssessment{
+		ExcursionCode:       current.Code,
+		AssessmentVersion:   nextVersion,
+		Summary:             strings.TrimSpace(input.Reason),
+		ImpactLevel:         current.RiskLevel,
+		AffectedProduct:     strings.TrimSpace(current.Category),
+		StabilityConclusion: strings.TrimSpace(firstNonEmpty(current.Description, input.Reason)),
+		RiskLevel:           current.RiskLevel,
+		ObservedTempC:       current.ObservedTempC,
+		DurationMinutes:     current.DurationMinutes,
+		SensorEvidence:      evidence,
+		EvaluatedBy:         actor,
+		EvaluatedAt:         now,
+		Status:              string(constants.AssessmentStateCurrent),
 	}
-	return s.repository.Get(ctx, id)
+	detail, _ := json.Marshal(map[string]any{
+		"reason": input.Reason, "sensorEvidence": evidence, "containerCode": current.ContainerCode,
+		"assessmentVersion": nextVersion,
+	})
+	updated, _, err := s.assessments.CompleteAssessment(ctx, repository.CompleteAssessmentInput{
+		ExcursionID:              current.ID,
+		Assessment:               assessment,
+		ExpectedAggregateVersion: input.ExpectedVersion,
+		Audit:                    auditLog(actor, requestID, "transition", "ExcursionEvent", current.ID, current.Status, "decided", string(detail)),
+	})
+	if err != nil {
+		return model.ExcursionEvent{}, fmt.Errorf("complete impact assessment: %w", err)
+	}
+	return updated, nil
+}
+
+// returnForReview supersedes the current assessment version and invalidates the
+// decisions referencing it. Superseded decisions remain as history but can no
+// longer be approved or close the deviation.
+func (s *excursionEventService) returnForReview(ctx context.Context, current model.ExcursionEvent, input dto.TransitionRequest, evidence, actor, requestID string) (model.ExcursionEvent, error) {
+	reason := strings.TrimSpace(input.Reason)
+	updated, _, err := s.assessments.ReturnForReview(ctx, repository.ReturnForReviewInput{
+		ExcursionID:              current.ID,
+		ExpectedAggregateVersion: input.ExpectedVersion,
+		Reason:                   reason,
+		Actor:                    actor,
+		RequestID:                requestID,
+		DecisionAuditAction:      "assessment_invalidated",
+		Audit: auditLog(actor, requestID, "transition", "ExcursionEvent", current.ID, "decided", "in_review",
+			mustJSON(map[string]any{
+				"reason": reason, "sensorEvidence": evidence, "containerCode": current.ContainerCode,
+				"supersededVersion": *current.CurrentAssessmentVersion,
+			})),
+	})
+	if err != nil {
+		return model.ExcursionEvent{}, fmt.Errorf("return excursion for re-review: %w", err)
+	}
+	return updated, nil
 }
 
 func (s *excursionEventService) Delete(ctx context.Context, id uint, actor, requestID string) error {
@@ -172,9 +270,33 @@ func (s *excursionEventService) StatusCounts(ctx context.Context) (map[string]in
 	return s.repository.CountByStatus(ctx)
 }
 
+func (s *excursionEventService) ListAssessments(ctx context.Context, id uint) ([]model.ImpactAssessment, error) {
+	current, err := s.repository.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.assessments.ListForExcursion(ctx, current.Code)
+}
+
+func (s *excursionEventService) ListDecisions(ctx context.Context, id uint) ([]model.DispositionDecision, error) {
+	current, err := s.repository.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.disposition.ListForExcursion(ctx, current.Code)
+}
+
 func validateExcursionEventBusinessFields(code, name, facility, owner string) error {
 	if strings.TrimSpace(code) == "" || strings.TrimSpace(name) == "" || strings.TrimSpace(facility) == "" || strings.TrimSpace(owner) == "" {
 		return ErrInvalidInput
 	}
 	return nil
+}
+
+func mustJSON(value any) string {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "{}"
+	}
+	return string(raw)
 }

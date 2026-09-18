@@ -20,6 +20,8 @@ func (h *ExcursionEventHandler) Register(group *gin.RouterGroup) {
 	resource := group.Group("/excursions")
 	resource.GET("", h.list)
 	resource.GET("/:id", h.get)
+	resource.GET("/:id/assessments", h.assessments)
+	resource.GET("/:id/decisions", h.decisions)
 	resource.POST("", middleware.RequireMinimumRole("operator"), h.create)
 	resource.PUT("/:id", middleware.RequireMinimumRole("reviewer"), h.update)
 	resource.POST("/:id/transition", middleware.RequireMinimumRole("reviewer"), h.transition)
@@ -47,6 +49,32 @@ func (h *ExcursionEventHandler) get(c *gin.Context) {
 		return
 	}
 	util.OK(c, item)
+}
+
+func (h *ExcursionEventHandler) assessments(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	items, err := h.service.ListAssessments(c.Request.Context(), id)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	util.OK(c, items)
+}
+
+func (h *ExcursionEventHandler) decisions(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	items, err := h.service.ListDecisions(c.Request.Context(), id)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	util.OK(c, items)
 }
 
 func (h *ExcursionEventHandler) create(c *gin.Context) {

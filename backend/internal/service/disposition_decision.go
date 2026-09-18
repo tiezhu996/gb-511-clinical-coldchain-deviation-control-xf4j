@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -24,13 +25,15 @@ type DispositionDecisionService interface {
 }
 
 type dispositionDecisionService struct {
-	repository repository.DispositionDecisionRepository
-	evidence   repository.SensorEvidenceRepository
-	security   SecurityService
+	repository  repository.DispositionDecisionRepository
+	assessments repository.ImpactAssessmentRepository
+	excursions  repository.ExcursionEventRepository
+	evidence    repository.SensorEvidenceRepository
+	security    SecurityService
 }
 
-func NewDispositionDecisionService(repo repository.DispositionDecisionRepository, evidence repository.SensorEvidenceRepository, security SecurityService) DispositionDecisionService {
-	return &dispositionDecisionService{repository: repo, evidence: evidence, security: security}
+func NewDispositionDecisionService(repo repository.DispositionDecisionRepository, assessments repository.ImpactAssessmentRepository, excursions repository.ExcursionEventRepository, evidence repository.SensorEvidenceRepository, security SecurityService) DispositionDecisionService {
+	return &dispositionDecisionService{repository: repo, assessments: assessments, excursions: excursions, evidence: evidence, security: security}
 }
 
 func (s *dispositionDecisionService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.DispositionDecision], error) {
@@ -66,11 +69,18 @@ func (s *dispositionDecisionService) Create(ctx context.Context, input dto.Creat
 	if count, err := s.evidence.CountForExcursion(ctx, item.ExcursionCode); err != nil || count == 0 {
 		return model.DispositionDecision{}, fmt.Errorf("%w: registered sensor evidence is required for the excursion", ErrInvalidInput)
 	}
-	if err := s.repository.Create(ctx, &item); err != nil {
+	// The proposal is pinned to the assessment version currently effective on
+	// the deviation, re-checked under a row lock against concurrent return.
+	audit := auditLog(actor, requestID, "create", "DispositionDecision", 0, "", "draft",
+		fmt.Sprintf("created 处置决定 for excursion=%s", item.ExcursionCode))
+	created, _, err := s.assessments.CreateProposal(ctx, repository.CreateProposalInput{Decision: &item, Audit: audit})
+	if err != nil {
+		if errors.Is(err, repository.ErrStaleAssessment) {
+			return model.DispositionDecision{}, fmt.Errorf("%w: %s", ErrInvalidInput, err.Error())
+		}
 		return model.DispositionDecision{}, fmt.Errorf("create 处置决定: %w", err)
 	}
-	_ = s.security.Audit(ctx, actor, requestID, "create", "DispositionDecision", item.ID, "", item.Status, "created 处置决定")
-	return item, nil
+	return created, nil
 }
 
 func (s *dispositionDecisionService) Update(ctx context.Context, id uint, input dto.UpdateDispositionDecision, actor, requestID string) (model.DispositionDecision, error) {
@@ -80,6 +90,16 @@ func (s *dispositionDecisionService) Update(ctx context.Context, id uint, input 
 	}
 	if current.Status != "draft" || !strings.EqualFold(current.ProposedBy, actor) {
 		return model.DispositionDecision{}, fmt.Errorf("%w: only the proposer may edit a draft disposition", ErrInvalidInput)
+	}
+	if strings.TrimSpace(current.InvalidatedReason) != "" || current.AssessmentVersion == nil {
+		return model.DispositionDecision{}, fmt.Errorf("%w: proposal is historical after assessment version %d and cannot be edited", ErrInvalidInput, assessmentVersionOf(current))
+	}
+	excursion, err := s.excursions.GetByCode(ctx, current.ExcursionCode)
+	if err != nil {
+		return model.DispositionDecision{}, err
+	}
+	if excursion.CurrentAssessmentVersion == nil || *excursion.CurrentAssessmentVersion != *current.AssessmentVersion {
+		return model.DispositionDecision{}, fmt.Errorf("%w: assessment version %d is no longer current; raise a new proposal", ErrStaleAssessment, assessmentVersionOf(current))
 	}
 	if err := validateDispositionDecisionBusinessFields(current.Code, input.Name, input.Facility, input.Owner); err != nil {
 		return model.DispositionDecision{}, err
@@ -109,7 +129,8 @@ func (s *dispositionDecisionService) Update(ctx context.Context, id uint, input 
 	if err := s.repository.Update(ctx, id, input.ExpectedVersion, &current); err != nil {
 		return model.DispositionDecision{}, fmt.Errorf("update 处置决定: %w", err)
 	}
-	_ = s.security.Audit(ctx, actor, requestID, "update", "DispositionDecision", id, current.Status, current.Status, "updated business fields")
+	_ = s.security.Audit(ctx, actor, requestID, "update", "DispositionDecision", id, current.Status, current.Status,
+		fmt.Sprintf("updated draft proposal on assessment version %d", *current.AssessmentVersion))
 	return s.repository.Get(ctx, id)
 }
 
@@ -122,11 +143,8 @@ func (s *dispositionDecisionService) Transition(ctx context.Context, id uint, in
 	if !constants.CanTransition(constants.DispositionDecisionTransitions, current.Status, target) {
 		return model.DispositionDecision{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, current.Status, target)
 	}
-	before := current.Status
-	if before == "draft" {
-		if err := validateIndependentApproval(current.ProposedBy, actor); err != nil {
-			return model.DispositionDecision{}, err
-		}
+	if err := validateIndependentApproval(current.ProposedBy, actor); err != nil {
+		return model.DispositionDecision{}, err
 	}
 	evidence := strings.TrimSpace(input.Evidence)
 	if evidence == "" {
@@ -138,23 +156,33 @@ func (s *dispositionDecisionService) Transition(ctx context.Context, id uint, in
 	if count, err := s.evidence.CountForExcursion(ctx, current.ExcursionCode); err != nil || count == 0 {
 		return model.DispositionDecision{}, fmt.Errorf("%w: registered sensor evidence is required for approval", ErrInvalidInput)
 	}
-	current.Status = target
-	current.SensorEvidence = evidence
-	current.Evidence = evidence
-	current.DecisionBasis = strings.TrimSpace(input.Reason)
-	current.ApprovedBy = actor
-	now := time.Now().UTC()
-	current.DecidedAt = &now
-	current.Version = input.ExpectedVersion + 1
-	current.UpdatedAt = now
+	// Approval and a concurrent return-for-review are reconciled under a lock on
+	// the deviation: only one can end up effective for the current version.
 	detail, _ := json.Marshal(map[string]any{
 		"reason": input.Reason, "sensorEvidence": evidence, "excursionCode": current.ExcursionCode,
 		"proposedBy": current.ProposedBy, "approvedBy": actor,
+		"assessmentVersion": assessmentVersionOf(current),
 	})
-	if err := s.repository.Update(ctx, id, input.ExpectedVersion, &current, auditLog(actor, requestID, "transition", "DispositionDecision", id, before, target, string(detail))); err != nil {
-		return model.DispositionDecision{}, fmt.Errorf("transition 处置决定: %w", err)
+	approved, _, err := s.assessments.ApproveFinalDecision(ctx, repository.ApproveFinalDecisionInput{
+		DecisionID:              id,
+		ExpectedDecisionVersion: input.ExpectedVersion,
+		TargetStatus:            target,
+		Evidence:                evidence,
+		Reason:                  strings.TrimSpace(input.Reason),
+		Actor:                   actor,
+		Audit:                   auditLog(actor, requestID, "transition", "DispositionDecision", id, "draft", target, string(detail)),
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrStaleAssessment):
+			return model.DispositionDecision{}, fmt.Errorf("%w: decision references assessment version %d which is no longer current; approve a newly proposed decision instead", ErrStaleAssessment, assessmentVersionOf(current))
+		case errors.Is(err, repository.ErrInvalidWorkflowState):
+			return model.DispositionDecision{}, fmt.Errorf("%w: %s", ErrInvalidTransition, err.Error())
+		default:
+			return model.DispositionDecision{}, fmt.Errorf("transition 处置决定: %w", err)
+		}
 	}
-	return s.repository.Get(ctx, id)
+	return approved, nil
 }
 
 func (s *dispositionDecisionService) Delete(ctx context.Context, id uint, actor, requestID string) error {
@@ -189,4 +217,11 @@ func validateIndependentApproval(proposedBy, approvedBy string) error {
 		return fmt.Errorf("%w: disposition requires an independent second reviewer", ErrInvalidInput)
 	}
 	return nil
+}
+
+func assessmentVersionOf(decision model.DispositionDecision) uint {
+	if decision.AssessmentVersion == nil {
+		return 0
+	}
+	return *decision.AssessmentVersion
 }

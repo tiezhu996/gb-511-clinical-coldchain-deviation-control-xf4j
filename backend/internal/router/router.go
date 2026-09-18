@@ -34,6 +34,7 @@ func New(cfg config.Config, db *gorm.DB, redisClient *redis.Client, logger *slog
 	temperatureWindowRepository := repository.NewTemperatureWindowRepository(db)
 	excursionEventRepository := repository.NewExcursionEventRepository(db)
 	dispositionDecisionRepository := repository.NewDispositionDecisionRepository(db)
+	impactAssessmentRepository := repository.NewImpactAssessmentRepository(db)
 	sensorEvidenceRepository := repository.NewSensorEvidenceRepository(db)
 	minioClient, minioErr := minio.New(cfg.MinIOEndpoint, &minio.Options{Creds: credentials.NewStaticV4(cfg.MinIOAccessKey, cfg.MinIOSecretKey, ""), Secure: cfg.MinIOUseSSL})
 	if minioErr != nil {
@@ -42,8 +43,8 @@ func New(cfg config.Config, db *gorm.DB, redisClient *redis.Client, logger *slog
 	}
 	transportContainerService := service.NewTransportContainerService(transportContainerRepository, securityService)
 	temperatureWindowService := service.NewTemperatureWindowService(temperatureWindowRepository, securityService)
-	excursionEventService := service.NewExcursionEventService(excursionEventRepository, dispositionDecisionRepository, sensorEvidenceRepository, securityService)
-	dispositionDecisionService := service.NewDispositionDecisionService(dispositionDecisionRepository, sensorEvidenceRepository, securityService)
+	excursionEventService := service.NewExcursionEventService(excursionEventRepository, dispositionDecisionRepository, impactAssessmentRepository, sensorEvidenceRepository, securityService)
+	dispositionDecisionService := service.NewDispositionDecisionService(dispositionDecisionRepository, impactAssessmentRepository, excursionEventRepository, sensorEvidenceRepository, securityService)
 	sensorEvidenceService := service.NewSensorEvidenceService(sensorEvidenceRepository, minioClient, cfg.MinIOBucket)
 	transportContainerHandler := handler.NewTransportContainerHandler(transportContainerService)
 	temperatureWindowHandler := handler.NewTemperatureWindowHandler(temperatureWindowService)

@@ -22,6 +22,36 @@ type DispositionDecision struct {
 	EffectiveAt    time.Time  `json:"effectiveAt"`
 	Evidence       string     `json:"evidence" gorm:"size:2000"`
 	RelatedCode    string     `json:"relatedCode" gorm:"size:64;index"`
+	// AssessmentVersion pins the proposal to the ImpactAssessment version that
+	// was current when it was raised. A decision can close the deviation only
+	// while this still matches the deviation's current version.
+	AssessmentVersion *uint `json:"assessmentVersion" gorm:"index"`
+	// InvalidatedReason is set when the deviation is returned for re-review.
+	// Such decisions stay visible as history but can never be approved or used
+	// to close the deviation again.
+	InvalidatedReason string     `json:"invalidatedReason" gorm:"size:500"`
+	InvalidatedAt     *time.Time `json:"invalidatedAt"`
+}
+
+// IsFinal reports whether the disposition has reached an immutable release,
+// quarantine or discard state.
+func (item DispositionDecision) IsFinal() bool {
+	switch item.Status {
+	case "release", "quarantine", "discard":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsEffectiveFor reports whether the decision can still drive closure of its
+// deviation: it must be final, never invalidated, and it must match the
+// assessment version currently effective for the deviation.
+func (item DispositionDecision) IsEffectiveFor(currentAssessmentVersion *uint) bool {
+	return item.IsFinal() &&
+		item.InvalidatedReason == "" &&
+		item.AssessmentVersion != nil && currentAssessmentVersion != nil &&
+		*item.AssessmentVersion == *currentAssessmentVersion
 }
 
 func (item *DispositionDecision) GetBase() *BaseModel { return &item.BaseModel }
