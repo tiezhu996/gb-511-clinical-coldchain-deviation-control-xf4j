@@ -23,6 +23,10 @@ type ExcursionEvent struct {
 	EffectiveAt     time.Time `json:"effectiveAt"`
 	Evidence        string    `json:"evidence" gorm:"size:2000"`
 	RelatedCode     string    `json:"relatedCode" gorm:"size:64;index"`
+	// AssessmentVersion identifies the current 影响评估 version. It starts at 0 and is
+	// incremented every time the excursion enters the decided (已评估) state, so a
+	// returned-and-reassessed excursion always gets a fresh version.
+	AssessmentVersion uint `json:"assessmentVersion" gorm:"not null;default:0"`
 }
 
 func (item *ExcursionEvent) GetBase() *BaseModel { return &item.BaseModel }

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import Button from '@mui/material/Button';
 import AddAlertOutlinedIcon from '@mui/icons-material/AddAlertOutlined';
 import TaskAltOutlinedIcon from '@mui/icons-material/TaskAltOutlined';
+import UndoOutlinedIcon from '@mui/icons-material/UndoOutlined';
 import { useExcursionEventStore } from '../stores/excursion-event';
 import { useDispositionDecisionStore } from '../stores/disposition-decision';
 import { useTemperatureWindowStore } from '../stores/temperature-window';
@@ -18,13 +19,19 @@ import { TemperatureBadge } from '../components/common/TemperatureBadge';
 import { EvidenceList } from '../components/common/EvidenceList';
 import { DecisionPanel } from '../components/common/DecisionPanel';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
-import { formatDate } from '../utils/format';
+import { assessmentVersionLabel, formatDate } from '../utils/format';
 
 function nextExcursionState(item: DomainRecord) {
   if (item.status === 'open') return 'in_review';
   if (item.status === 'in_review') return 'decided';
   if (item.status === 'decided') return 'closed';
   return '';
+}
+
+function transitionReason(item: DomainRecord, state: string) {
+  if (state === 'in_review') return item.status === 'decided' ? '评估结论退回重审，当前版本决定转入历史' : '质量复核员接收偏差并核对传感器曲线';
+  if (state === 'decided') return '传感器证据完整，偏差影响评估完成';
+  return '关联处置决定已完成';
 }
 
 export default function ExcursionEventPage() {
@@ -43,7 +50,8 @@ export default function ExcursionEventPage() {
   usePolling(refresh, 15000);
   useEffect(() => { if (selectedId === null && excursions.items[0]) setSelectedId(excursions.items[0].id); }, [excursions.items, selectedId]);
   const selected = excursions.items.find((item) => item.id === selectedId) || null;
-  const decision = selected ? dispositions.items.find((item) => (item.excursionCode || item.relatedCode) === selected.code) : null;
+  const decisionCandidates = useMemo(() => selected ? dispositions.items.filter((item) => (item.excursionCode || item.relatedCode) === selected.code) : [], [dispositions.items, selected]);
+  const decision = decisionCandidates.find((item) => !item.invalidatedAt && (item.assessmentVersion ?? 0) === (selected?.assessmentVersion ?? 0)) || decisionCandidates[0] || null;
   const selectedEvidence = selected ? evidenceStore.items.filter((item) => item.excursionCode === selected.code).map((item) => `${item.code} · ${item.objectKey} · SHA256 ${item.sha256.slice(0, 10)}…`) : [];
   const critical = useMemo(() => excursions.items.filter((item) => item.riskLevel === 'critical').length, [excursions.items]);
   const pendingCount = useMemo(() => excursions.items.filter((item) => ['open', 'in_review'].includes(item.status)).length, [excursions.items]);
@@ -57,15 +65,16 @@ export default function ExcursionEventPage() {
   };
   const transition = async () => {
     if (!pending) return;
-    await excursions.transition('excursions', pending.item, pending.state, pending.state === 'in_review' ? '质量复核员接收偏差并核对传感器曲线' : pending.state === 'decided' ? '传感器证据完整，偏差影响评估完成' : '关联处置决定已完成', pending.item.sensorEvidence || pending.item.evidence);
+    await excursions.transition('excursions', pending.item, pending.state, transitionReason(pending.item, pending.state), pending.item.sensorEvidence || pending.item.evidence);
     setPending(null);
   };
+  const isReturn = Boolean(pending && pending.item.status === 'decided' && pending.state === 'in_review');
   return <main className="workspace"><header className="page-header"><div><p className="eyebrow">EXCURSION RESPONSE</p><h1>偏差处理</h1><p>关联运输容器、温控规则和原始传感器证据，完成影响评估。</p></div>{canReport && <Button variant="contained" startIcon={<AddAlertOutlinedIcon />} onClick={() => setCreateOpen(true)}>登记偏差</Button>}</header>
     <section className="metrics"><MetricCard label="偏差事件" value={excursions.meta.total} detail="全量可追溯" /><MetricCard label="待闭环" value={pendingCount} detail="待质量评估" /><MetricCard label="严重偏差" value={critical} detail="优先隔离" /></section>
     {(excursions.error || evidenceStore.error) && <div className="alert" role="alert">{excursions.error || evidenceStore.error}</div>}
-    <section className="split-workspace"><div className="record-list">{excursions.items.map((item) => { const rule = windows.items.find((window) => window.code === item.windowCode); return <button key={item.id} className={selectedId === item.id ? 'record-row selected' : 'record-row'} onClick={() => setSelectedId(item.id)}><span><strong>{item.code}</strong><small>{item.containerCode || item.relatedCode} · {item.windowCode || '未绑定规则'}</small></span><TemperatureBadge value={item.observedTempC ?? item.metricValue} minimum={rule?.minimumCelsius} maximum={rule?.maximumCelsius} /><StatusBadge status={item.status} /></button>; })}</div>
-      <aside className="detail-pane">{selected ? <><header><div><small>{selected.code}</small><h2>{selected.name}</h2></div><StatusBadge status={selected.status} /></header><div className="detail-grid"><span><small>运输容器</small>{selected.containerCode || selected.relatedCode}</span><span><small>温控规则</small>{selected.windowCode || '-'}</span><span><small>持续时长</small>{selected.durationMinutes || 0} 分钟</span><span><small>检测时间</small>{formatDate(selected.detectedAt || selected.effectiveAt)}</span></div><h3>传感器证据</h3><EvidenceList evidence={selectedEvidence.length ? selectedEvidence : selected.sensorEvidence || selected.evidence} /><DecisionPanel decision={decision} compact />{canReview && nextExcursionState(selected) && <Button variant="contained" startIcon={<TaskAltOutlinedIcon />} onClick={() => setPending({ item: selected, state: nextExcursionState(selected) })}>{selected.status === 'open' ? '接收复核' : selected.status === 'in_review' ? '完成影响评估' : '关闭事件'}</Button>}</> : <div className="empty">选择一个偏差事件</div>}</aside></section>
+    <section className="split-workspace"><div className="record-list">{excursions.items.map((item) => { const rule = windows.items.find((window) => window.code === item.windowCode); return <button key={item.id} className={selectedId === item.id ? 'record-row selected' : 'record-row'} onClick={() => setSelectedId(item.id)}><span><strong>{item.code}</strong><small>{item.containerCode || item.relatedCode} · {item.windowCode || '未绑定规则'} · 评估 {assessmentVersionLabel(item.assessmentVersion)}</small></span><TemperatureBadge value={item.observedTempC ?? item.metricValue} minimum={rule?.minimumCelsius} maximum={rule?.maximumCelsius} /><StatusBadge status={item.status} /></button>; })}</div>
+      <aside className="detail-pane">{selected ? <><header><div><small>{selected.code}</small><h2>{selected.name}</h2></div><StatusBadge status={selected.status} /></header><div className="detail-grid"><span><small>运输容器</small>{selected.containerCode || selected.relatedCode}</span><span><small>温控规则</small>{selected.windowCode || '-'}</span><span><small>持续时长</small>{selected.durationMinutes || 0} 分钟</span><span><small>检测时间</small>{formatDate(selected.detectedAt || selected.effectiveAt)}</span><span><small>当前评估版本</small>{assessmentVersionLabel(selected.assessmentVersion)}</span></div><h3>传感器证据</h3><EvidenceList evidence={selectedEvidence.length ? selectedEvidence : selected.sensorEvidence || selected.evidence} /><DecisionPanel decision={decision} compact currentVersion={selected.assessmentVersion} />{canReview && nextExcursionState(selected) && <Button variant="contained" startIcon={<TaskAltOutlinedIcon />} onClick={() => setPending({ item: selected, state: nextExcursionState(selected) })}>{selected.status === 'open' ? '接收复核' : selected.status === 'in_review' ? '完成影响评估' : '关闭事件'}</Button>}{canReview && selected.status === 'decided' && <Button color="warning" variant="outlined" startIcon={<UndoOutlinedIcon />} onClick={() => setPending({ item: selected, state: 'in_review' })}>退回重审</Button>}</> : <div className="empty">选择一个偏差事件</div>}</aside></section>
     <ConfirmDialog open={createOpen} title="登记温度偏差" onCancel={() => setCreateOpen(false)} onConfirm={() => void createExcursion()}><p>将保存容器、温控规则、峰值温度、持续时长和 MinIO 传感器证据。</p></ConfirmDialog>
-    <ConfirmDialog open={Boolean(pending)} title="确认偏差状态迁移" onCancel={() => setPending(null)} onConfirm={() => void transition()}><p>偏差不能跳过复核；形成影响评估时必须存在传感器证据。</p><strong>{pending?.item.status} → {pending?.state}</strong></ConfirmDialog>
+    <ConfirmDialog open={Boolean(pending)} title={isReturn ? '确认退回重审' : '确认偏差状态迁移'} onCancel={() => setPending(null)} onConfirm={() => void transition()}>{isReturn ? <><p>退回后当前评估版本 v{pending?.item.assessmentVersion} 的处置决定将全部失效，仅作历史留痕，不能再次闭环；重新评估会生成新版本，需按新版本新建决定并独立批准。</p><strong>{pending?.item.status} → {pending?.state}</strong></> : <><p>偏差不能跳过复核；形成影响评估时必须存在传感器证据，并生成新的评估版本。</p><strong>{pending?.item.status} → {pending?.state}</strong></>}</ConfirmDialog>
   </main>;
 }

@@ -22,6 +22,14 @@ type DispositionDecision struct {
 	EffectiveAt    time.Time  `json:"effectiveAt"`
 	Evidence       string     `json:"evidence" gorm:"size:2000"`
 	RelatedCode    string     `json:"relatedCode" gorm:"size:64;index"`
+	// AssessmentVersion pins the decision to the excursion 影响评估 version it was
+	// proposed against. Only decisions matching the excursion's current version may be
+	// approved or used to close the excursion.
+	AssessmentVersion uint `json:"assessmentVersion" gorm:"not null;default:0;index"`
+	// InvalidatedAt/InvalidatedReason turn a stale decision into read-only history once
+	// the excursion is returned for re-review; the row itself is never reused.
+	InvalidatedAt     *time.Time `json:"invalidatedAt"`
+	InvalidatedReason string     `json:"invalidatedReason" gorm:"size:200"`
 }
 
 func (item *DispositionDecision) GetBase() *BaseModel { return &item.BaseModel }

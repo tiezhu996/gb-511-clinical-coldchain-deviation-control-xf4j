@@ -12,3 +12,11 @@ export function statusTone(status: string): 'success' | 'warning' | 'danger' | '
   if (/hold|warning|review|pending|restricted|limited|quarantine/.test(status)) return 'warning';
   return 'neutral';
 }
+export function invalidationReasonLabel(reason?: string): string {
+  if (!reason) return '';
+  const labels: Record<string, string> = { excursion_returned_for_review: '偏差退回重审，评估版本已更新' };
+  return labels[reason] || reason;
+}
+export function assessmentVersionLabel(version?: number): string {
+  return version && version > 0 ? `v${version}` : '未评估';
+}

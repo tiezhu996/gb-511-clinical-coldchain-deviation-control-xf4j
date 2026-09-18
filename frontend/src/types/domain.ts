@@ -38,6 +38,9 @@ export interface DomainRecord {
   proposedBy?: string;
   approvedBy?: string;
   decidedAt?: string | null;
+  assessmentVersion?: number;
+  invalidatedAt?: string | null;
+  invalidatedReason?: string;
   createdAt: string;
   updatedAt: string;
 }

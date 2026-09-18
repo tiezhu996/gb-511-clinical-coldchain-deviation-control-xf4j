@@ -53,6 +53,11 @@ var DispositionDecisionTransitions = map[string]map[string]bool{
 	"discard":    {},
 }
 
+// DecisionInvalidReasonExcursionReturned marks decisions whose assessment version went
+// stale because the excursion was sent back for re-review. Invalidated decisions are
+// kept as read-only history and can never close an excursion again.
+const DecisionInvalidReasonExcursionReturned = "excursion_returned_for_review"
+
 func CanTransition(graph map[string]map[string]bool, from, to string) bool {
 	targets, exists := graph[from]
 	return exists && targets[to]

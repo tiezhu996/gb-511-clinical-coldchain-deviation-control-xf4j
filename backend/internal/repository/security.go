@@ -13,6 +13,10 @@ import (
 
 var ErrVersionConflict = errors.New("record was changed by another request")
 
+// ErrAssessmentStale is returned when a disposition decision no longer matches the
+// excursion's current 影响评估 version (for example after a concurrent return-for-review).
+var ErrAssessmentStale = errors.New("decision does not match the current assessment version")
+
 type Page[T any] struct {
 	Items    []T   `json:"items"`
 	Total    int64 `json:"total"`

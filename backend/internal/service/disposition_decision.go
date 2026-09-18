@@ -66,7 +66,9 @@ func (s *dispositionDecisionService) Create(ctx context.Context, input dto.Creat
 	if count, err := s.evidence.CountForExcursion(ctx, item.ExcursionCode); err != nil || count == 0 {
 		return model.DispositionDecision{}, fmt.Errorf("%w: registered sensor evidence is required for the excursion", ErrInvalidInput)
 	}
-	if err := s.repository.Create(ctx, &item); err != nil {
+	// 处置提议只引用当前影响评估版本: the repository pins AssessmentVersion to the
+	// excursion's current version under a row lock and rejects non-decided excursions.
+	if err := s.repository.CreateForCurrentAssessment(ctx, &item); err != nil {
 		return model.DispositionDecision{}, fmt.Errorf("create 处置决定: %w", err)
 	}
 	_ = s.security.Audit(ctx, actor, requestID, "create", "DispositionDecision", item.ID, "", item.Status, "created 处置决定")
@@ -77,6 +79,9 @@ func (s *dispositionDecisionService) Update(ctx context.Context, id uint, input 
 	current, err := s.repository.Get(ctx, id)
 	if err != nil {
 		return model.DispositionDecision{}, err
+	}
+	if current.InvalidatedAt != nil {
+		return model.DispositionDecision{}, fmt.Errorf("%w: invalidated decisions are read-only history", ErrInvalidInput)
 	}
 	if current.Status != "draft" || !strings.EqualFold(current.ProposedBy, actor) {
 		return model.DispositionDecision{}, fmt.Errorf("%w: only the proposer may edit a draft disposition", ErrInvalidInput)
@@ -122,6 +127,9 @@ func (s *dispositionDecisionService) Transition(ctx context.Context, id uint, in
 	if !constants.CanTransition(constants.DispositionDecisionTransitions, current.Status, target) {
 		return model.DispositionDecision{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, current.Status, target)
 	}
+	if current.InvalidatedAt != nil {
+		return model.DispositionDecision{}, fmt.Errorf("%w: decision invalidated (%s) and kept as history only", ErrInvalidInput, current.InvalidatedReason)
+	}
 	before := current.Status
 	if before == "draft" {
 		if err := validateIndependentApproval(current.ProposedBy, actor); err != nil {
@@ -149,9 +157,12 @@ func (s *dispositionDecisionService) Transition(ctx context.Context, id uint, in
 	current.UpdatedAt = now
 	detail, _ := json.Marshal(map[string]any{
 		"reason": input.Reason, "sensorEvidence": evidence, "excursionCode": current.ExcursionCode,
-		"proposedBy": current.ProposedBy, "approvedBy": actor,
+		"proposedBy": current.ProposedBy, "approvedBy": actor, "assessmentVersion": current.AssessmentVersion,
 	})
-	if err := s.repository.Update(ctx, id, input.ExpectedVersion, &current, auditLog(actor, requestID, "transition", "DispositionDecision", id, before, target, string(detail))); err != nil {
+	// The approval commits only while the decision still matches the excursion's current
+	// assessment version; a concurrent 退回重审 serializes on the excursion row and
+	// exactly one of the two operations keeps a valid result.
+	if err := s.repository.ApproveForCurrentAssessment(ctx, &current, input.ExpectedVersion, auditLog(actor, requestID, "transition", "DispositionDecision", id, before, target, string(detail))); err != nil {
 		return model.DispositionDecision{}, fmt.Errorf("transition 处置决定: %w", err)
 	}
 	return s.repository.Get(ctx, id)

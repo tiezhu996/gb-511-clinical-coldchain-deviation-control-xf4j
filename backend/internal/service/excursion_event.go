@@ -137,9 +137,12 @@ func (s *excursionEventService) Transition(ctx context.Context, id uint, input d
 		}
 	}
 	if target == string(constants.ExcursionStateClosed) {
-		final, err := s.disposition.HasFinalForExcursion(ctx, current.Code)
-		if err != nil || !final {
-			return model.ExcursionEvent{}, fmt.Errorf("%w: a final disposition is required before closing an excursion", ErrInvalidInput)
+		final, err := s.disposition.HasValidFinalForAssessment(ctx, current.Code, current.AssessmentVersion)
+		if err != nil {
+			return model.ExcursionEvent{}, err
+		}
+		if !final {
+			return model.ExcursionEvent{}, fmt.Errorf("%w: closing requires a final decision matching assessment v%d approved by a second person", ErrInvalidInput, current.AssessmentVersion)
 		}
 	}
 	current.Status = target
@@ -148,9 +151,23 @@ func (s *excursionEventService) Transition(ctx context.Context, id uint, input d
 	if target == string(constants.ExcursionStateInReview) || target == string(constants.ExcursionStateDecided) {
 		current.Reviewer = actor
 	}
+	if target == string(constants.ExcursionStateDecided) {
+		// Entering 已评估 always starts a new impact-assessment version; decisions made
+		// against earlier versions stay as invalidated history.
+		current.AssessmentVersion++
+	}
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
-	detail, _ := json.Marshal(map[string]any{"reason": input.Reason, "sensorEvidence": evidence, "containerCode": current.ContainerCode})
+	detail, _ := json.Marshal(map[string]any{"reason": input.Reason, "sensorEvidence": evidence, "containerCode": current.ContainerCode, "assessmentVersion": current.AssessmentVersion})
+	if before == string(constants.ExcursionStateDecided) && target == string(constants.ExcursionStateInReview) {
+		// 退回重审: decisions of the current assessment version become history in the
+		// same transaction, so a concurrent approval keeps exactly one valid result.
+		excursionAudit := auditLog(actor, requestID, "transition", "ExcursionEvent", id, before, target, string(detail))
+		if _, err := s.repository.ReturnForReview(ctx, &current, input.ExpectedVersion, constants.DecisionInvalidReasonExcursionReturned, time.Now().UTC(), actor, requestID, excursionAudit); err != nil {
+			return model.ExcursionEvent{}, fmt.Errorf("return 偏差事件 for review: %w", err)
+		}
+		return s.repository.Get(ctx, id)
+	}
 	if err := s.repository.Update(ctx, id, input.ExpectedVersion, &current, auditLog(actor, requestID, "transition", "ExcursionEvent", id, before, target, string(detail))); err != nil {
 		return model.ExcursionEvent{}, fmt.Errorf("transition 偏差事件: %w", err)
 	}
